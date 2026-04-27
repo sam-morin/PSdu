@@ -13,15 +13,20 @@ function Get-DiskUsage {
     .PARAMETER MaxDepth
         How many directory levels deep to pre-scan. Default: unlimited (-1).
 
+    .PARAMETER VerboseScan
+        Print each directory path to the console as it is scanned.
+
     .EXAMPLE
         Get-DiskUsage
         Get-DiskUsage -Path C:\Users
         Get-DiskUsage -Path D:\ -MaxDepth 5
+        Get-DiskUsage -Path C:\ -VerboseScan
     #>
     [CmdletBinding()]
     param(
         [string]$Path,
-        [int]$MaxDepth = -1
+        [int]$MaxDepth = -1,
+        [switch]$VerboseScan
     )
 
     # --- Colour palette -------------------------------------------------------
@@ -56,7 +61,7 @@ function Get-DiskUsage {
     }
 
     # --- Helper: recursive size scanner --------------------------------------
-    function Get-FolderSize([string]$FolderPath, [int]$Depth, [int]$MaxD) {
+    function Get-FolderSize([string]$FolderPath, [int]$Depth, [int]$MaxD, [bool]$Verbose = $false) {
         $node = [PSCustomObject]@{
             Name     = Split-Path $FolderPath -Leaf
             FullPath = $FolderPath
@@ -67,6 +72,9 @@ function Get-DiskUsage {
         }
 
         try {
+            if ($Verbose) {
+                Write-Host ("  [scan] " + $FolderPath) -ForegroundColor DarkGray
+            }
             $files = Get-ChildItem -LiteralPath $FolderPath -File -Force -ErrorAction Stop
             foreach ($f in $files) {
                 $fileNode = [PSCustomObject]@{
@@ -84,7 +92,7 @@ function Get-DiskUsage {
             $dirs = Get-ChildItem -LiteralPath $FolderPath -Directory -Force -ErrorAction Stop
             foreach ($d in $dirs) {
                 if ($MaxD -eq -1 -or $Depth -lt $MaxD) {
-                    $child = Get-FolderSize -FolderPath $d.FullName -Depth ($Depth + 1) -MaxD $MaxD
+                    $child = Get-FolderSize -FolderPath $d.FullName -Depth ($Depth + 1) -MaxD $MaxD -Verbose $Verbose
                 } else {
                     # Shallow placeholder - scanned lazily when the user drills in
                     $child = [PSCustomObject]@{
@@ -111,7 +119,7 @@ function Get-DiskUsage {
     function Expand-Node([object]$Node) {
         if ($null -eq $Node.Children) {
             Write-Host ("`r  Scanning " + $Node.FullPath + "...") -NoNewline -ForegroundColor $Colors.Help
-            $expanded    = Get-FolderSize -FolderPath $Node.FullPath -Depth 0 -MaxD 1
+            $expanded    = Get-FolderSize -FolderPath $Node.FullPath -Depth 0 -MaxD 1 -Verbose $VerboseScan.IsPresent
             $Node.Children = $expanded.Children
             $Node.Size     = $expanded.Size
         }
@@ -138,7 +146,7 @@ function Get-DiskUsage {
         }
         foreach ($drv in $drives) {
             Write-Host ("  Scanning " + $drv.Root + " ...") -ForegroundColor $Colors.Help
-            $driveNode      = Get-FolderSize -FolderPath $drv.Root -Depth 0 -MaxD $MaxDepth
+            $driveNode      = Get-FolderSize -FolderPath $drv.Root -Depth 0 -MaxD $MaxDepth -Verbose $VerboseScan.IsPresent
             $driveNode.Name = $drv.Name + ":\"
             $scanRoot.Children.Add($driveNode)
             $scanRoot.Size += $driveNode.Size
@@ -150,7 +158,7 @@ function Get-DiskUsage {
             return
         }
         Write-Host ("  Scanning " + $Path + " ...") -ForegroundColor $Colors.Help
-        $scanRoot = Get-FolderSize -FolderPath (Resolve-Path $Path).Path -Depth 0 -MaxD $MaxDepth
+        $scanRoot = Get-FolderSize -FolderPath (Resolve-Path $Path).Path -Depth 0 -MaxD $MaxDepth -Verbose $VerboseScan.IsPresent
     }
 
     # --- Interactive viewer --------------------------------------------------
@@ -229,7 +237,7 @@ function Get-DiskUsage {
 
         # -- Footer -----------------------------------------------------------
         Write-Host $divider -ForegroundColor $Colors.Header
-        Write-Host "  [Up/Dn] Navigate  [Enter/Right] Open  [Bksp/Left] Back  [d] Delete  [q] Quit" `
+        Write-Host "  [Up/Dn] Navigate  [Enter/Right] Open  [Bksp/Left] Back  [d] Delete  [c] Clear contents  [q] Quit" `
             -ForegroundColor $Colors.Help
 
         # -- Read keystroke ---------------------------------------------------
@@ -286,6 +294,38 @@ function Get-DiskUsage {
                         catch {
                             Write-Host ("  ERROR: " + $_) -ForegroundColor $Colors.Error
                             Start-Sleep -Seconds 2
+                        }
+                    }
+                }
+            }
+
+            'C' {
+                if ($count -gt 0) {
+                    $target = $items[$selected]
+                    if ($target.IsDir) {
+                        [System.Console]::SetCursorPosition(0, [System.Console]::WindowHeight - 2)
+                        Write-Host ("  CLEAR CONTENTS of '" + $target.FullPath + "'? Folder kept. Type YES to confirm: ") `
+                            -ForegroundColor $Colors.Error -NoNewline
+                        [System.Console]::CursorVisible = $true
+                        $confirm = Read-Host
+                        [System.Console]::CursorVisible = $false
+                        if ($confirm -eq 'YES') {
+                            try {
+                                $children = Get-ChildItem -LiteralPath $target.FullPath -Force -ErrorAction Stop
+                                foreach ($child in $children) {
+                                    Remove-Item -LiteralPath $child.FullName -Recurse -Force -ErrorAction Stop
+                                }
+                                # Reset node so it re-scans as empty
+                                $target.Children = [System.Collections.Generic.List[object]]::new()
+                                $sizeFreed = $target.Size
+                                $target.Size = 0L
+                                $current.Size -= $sizeFreed
+                                foreach ($ancestor in $stack) { $ancestor.Size -= $sizeFreed }
+                            }
+                            catch {
+                                Write-Host ("  ERROR: " + $_) -ForegroundColor $Colors.Error
+                                Start-Sleep -Seconds 2
+                            }
                         }
                     }
                 }
